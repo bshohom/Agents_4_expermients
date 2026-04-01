@@ -1,0 +1,19 @@
+# Core runtime
+pandas
+openpyxl
+elsapy==0.5.1
+
+# LlamaIndex core + integrations used by this repo
+llama-index-core
+llama-index-embeddings-langchain
+llama-index-llms-ollama
+
+# Embeddings / HF stack
+langchain-huggingface
+sentence-transformers
+transformers
+huggingface-hub
+
+# Notebook / local development
+jupyter
+ipykernel
