@@ -1,38 +1,18 @@
-
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Any
 
 from llama_index.core import StorageContext, load_index_from_storage
 
-from local_runtime import configure_embedding_model, get_local_llm
+from local_runtime import configure_embedding_model, get_shared_llm
 
 
-DEFAULT_LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "Qwen/Qwen3-8B")
-DEFAULT_LOCAL_EMBED_MODEL = os.environ.get(
-    "LOCAL_EMBED_MODEL",
-    "/trace/group/tmousavi/gyunghuy/cache/huggingface/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
-)
-DEFAULT_EXPERIMENT_STORAGE_DIR = os.environ.get(
-    "EXPERIMENT_STORAGE_DIR",
-    "outputs/paper_memory_storage_experiment",
-)
-DEFAULT_CHUNKS_LABELED_PATH = Path(
-    os.environ.get("CHUNKS_LABELED_PATH", "outputs/chunks_labeled.jsonl")
-)
-DEFAULT_RAG1_OUTPUT_PATH = Path(
-    os.environ.get("RAG1_OUTPUT_PATH", "outputs/rag1_latest_output.json")
+DEFAULT_PROPOSER_PROMPT = (
+    "You are an experimental proposal generator that prioritizes feasibility and minimal BOM risk."
 )
 
-
-configure_embedding_model()
-llm = get_local_llm()
-
-
-AVAILABLE_BOM = {
+DEFAULT_AVAILABLE_BOM = {
     "material_family": "metals",
     "process_family": "joining",
     "materials": [
@@ -58,20 +38,26 @@ AVAILABLE_BOM = {
     "goal": "Propose one feasible first-pass joining experiment on metallic materials.",
 }
 
+DEFAULT_EXPERIMENT_STORAGE_DIR = Path("outputs/paper_memory_storage_experiment")
+DEFAULT_CHUNKS_LABELED_PATH = Path("outputs/chunks_labeled.jsonl")
+DEFAULT_RAG1_OUTPUT_PATH = Path("outputs/rag1_latest_output.json")
+
+configure_embedding_model()
+
 
 def overlap_score_text(text: str, bom: dict) -> int:
     text = (text or "").lower()
     score = 0
 
-    for item in bom["materials"]:
+    for item in bom.get("materials", []):
         if item.lower() in text:
             score += 2
 
-    for item in bom["equipment"]:
+    for item in bom.get("equipment", []):
         if item.lower() in text:
             score += 2
 
-    for item in bom["forbidden_items"]:
+    for item in bom.get("forbidden_items", []):
         if item.lower() in text:
             score -= 4
 
@@ -83,9 +69,6 @@ def overlap_score_node(node, bom: dict) -> int:
 
 
 def load_labeled_rows(path: Path) -> list[dict]:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing chunks_labeled file: {path}")
-
     rows = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -147,6 +130,8 @@ def build_rag1_prompt(
     rag2_feedback: dict | None = None,
     prompt_variant_text: str | None = None,
 ) -> str:
+    proposer_prefix = (prompt_variant_text or DEFAULT_PROPOSER_PROMPT).strip()
+
     feedback_block = ""
 
     if rag2_feedback is not None:
@@ -165,15 +150,9 @@ IMPORTANT:
 - Ignore any RAG2 feedback or self-generated revision that introduces or assumes anything not explicitly listed in the BOM.
 """
 
-    variant_block = ""
-    if prompt_variant_text:
-        variant_block = f"""
-
-Additional proposal-generation instructions for this run:
-{prompt_variant_text.strip()}
-"""
-
     return f"""
+{proposer_prefix}
+
 You are proposing ONE candidate new experiment.
 
 Use the literature cards as precedent summaries.
@@ -193,7 +172,7 @@ Literature Cards:
 {card_context}
 
 Supporting Evidence Chunks:
-{chunk_context}{feedback_block}{variant_block}
+{chunk_context}{feedback_block}
 
 Task:
 Propose ONE plausible first-pass experiment that is inspired by the retrieved papers and compatible with the BOM.
@@ -236,18 +215,23 @@ def run_rag1(
     save_output: bool = True,
     available_bom: dict | None = None,
     prompt_variant_text: str | None = None,
-    experiment_index_dir: str | None = None,
-    chunks_labeled_path: str | Path | None = None,
+    experiment_index_dir: str | Path = DEFAULT_EXPERIMENT_STORAGE_DIR,
+    chunks_labeled_path: str | Path = DEFAULT_CHUNKS_LABELED_PATH,
     output_path: str | Path | None = None,
+    temperature: float = 0.0,
+    top_p: float = 0.95,
+    seed: int | None = None,
+    model_name: str | None = None,
 ) -> dict:
-    available_bom = available_bom or AVAILABLE_BOM
-    experiment_index_dir = str(experiment_index_dir or DEFAULT_EXPERIMENT_STORAGE_DIR)
-    chunks_labeled_path = Path(chunks_labeled_path or DEFAULT_CHUNKS_LABELED_PATH)
-    output_path = Path(output_path or DEFAULT_RAG1_OUTPUT_PATH)
+    llm = get_shared_llm(model_name)
+    available_bom = available_bom or DEFAULT_AVAILABLE_BOM
+    experiment_index_dir = Path(experiment_index_dir)
+    chunks_labeled_path = Path(chunks_labeled_path)
+    output_path = Path(output_path) if output_path is not None else DEFAULT_RAG1_OUTPUT_PATH
 
     if cached_exp_evidence is None:
         storage_context = StorageContext.from_defaults(
-            persist_dir=experiment_index_dir
+            persist_dir=str(experiment_index_dir)
         )
         paper_card_index = load_index_from_storage(storage_context)
 
@@ -284,7 +268,7 @@ def run_rag1(
         print("RAG1 round-1 retrieval: caching experiment evidence pool.")
         print("Shortlisted paper cards:")
         for i, node in enumerate(shortlist, 1):
-            print(f"\\n[{i}] {node.metadata.get('source_title')}")
+            print(f"\n[{i}] {node.metadata.get('source_title')}")
             print(f"process_families={node.metadata.get('process_families')}")
             print(f"material_families={node.metadata.get('material_families')}")
 
@@ -300,8 +284,8 @@ def run_rag1(
         for node in shortlist:
             source_path = node.metadata.get("source_path", "")
             title = node.metadata.get("source_title", "")
-            n_chunks = len(paper_to_chunks.get(source_path, []))
-            print(f"{title}: {n_chunks} chunks")
+            n = len(paper_to_chunks.get(source_path, []))
+            print(f"{title}: {n} chunks")
 
         cached_exp_evidence = {
             "cards": [
@@ -317,7 +301,6 @@ def run_rag1(
             ],
             "paper_to_chunks": paper_to_chunks,
         }
-
     else:
         print("RAG1 is reusing cached experiment evidence pool.")
         shortlist = cached_exp_evidence["cards"]
@@ -343,7 +326,7 @@ DOI: {doi}
 """
         )
 
-    card_context = "\\n\\n" + ("\\n\\n" + "=" * 80 + "\\n\\n").join(card_blocks)
+    card_context = "\n\n" + ("\n\n" + "=" * 80 + "\n\n").join(card_blocks)
 
     chunk_blocks = []
     idx = 1
@@ -371,7 +354,7 @@ Text:
             )
             idx += 1
 
-    chunk_context = "\\n\\n" + ("\\n\\n" + "=" * 80 + "\\n\\n").join(chunk_blocks)
+    chunk_context = "\n\n" + ("\n\n" + "=" * 80 + "\n\n").join(chunk_blocks)
 
     if rag2_feedback is not None:
         print("RAG1 is revising with RAG2 feedback.")
@@ -386,23 +369,29 @@ Text:
         prompt_variant_text=prompt_variant_text,
     )
 
-    proposal = llm.complete(proposal_prompt, max_new_tokens=550)
+    proposal = llm.complete(
+        proposal_prompt,
+        max_new_tokens=550,
+        temperature=temperature,
+        top_p=top_p,
+        seed=seed,
+    )
 
     if "Candidate Experiment:" in proposal:
         proposal = proposal[proposal.find("Candidate Experiment:"):].strip()
 
     proposal = trim_repeated_sections(proposal)
 
-    spill_markers = ["\\nOkay,", "\\nLet me", "\\nBased on the"]
+    spill_markers = ["\nOkay,", "\nLet me", "\nBased on the"]
     for marker in spill_markers:
-        spill_idx = proposal.find(marker)
-        if spill_idx != -1:
-            proposal = proposal[:spill_idx].rstrip()
+        marker_idx = proposal.find(marker)
+        if marker_idx != -1:
+            proposal = proposal[:marker_idx].rstrip()
             break
 
-    proposal += "\\n\\nSource Papers Used:\\n" + "\\n".join(f"- {t}" for t in source_titles)
+    proposal += "\n\nSource Papers Used:\n" + "\n".join(f"- {t}" for t in source_titles)
 
-    print("\\n" + "=" * 100)
+    print("\n" + "=" * 100)
     print("RAG1 PROPOSAL")
     print("=" * 100)
     print(proposal)
@@ -411,13 +400,19 @@ Text:
         "available_bom": available_bom,
         "rag1_proposal": proposal,
         "cached_exp_evidence": cached_exp_evidence,
+        "generation_config": {
+            "temperature": temperature,
+            "top_p": top_p,
+            "seed": seed,
+            "model_name": llm.model_name,
+        },
     }
 
     if save_output:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf-8") as f:
             json.dump(rag1_output_payload, f, indent=2, ensure_ascii=False)
-        print(f"\\nSaved RAG1 output to: {output_path}")
+        print(f"\nSaved RAG1 output to: {output_path}")
 
     return rag1_output_payload
 

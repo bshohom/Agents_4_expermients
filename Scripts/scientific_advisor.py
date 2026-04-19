@@ -1,35 +1,23 @@
-
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from llama_index.core import StorageContext, load_index_from_storage
 
-from local_runtime import configure_embedding_model, get_local_llm
+from local_runtime import configure_embedding_model, get_shared_llm
 
 
-DEFAULT_LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "Qwen/Qwen3-8B")
-DEFAULT_LOCAL_EMBED_MODEL = os.environ.get(
-    "LOCAL_EMBED_MODEL",
-    "/trace/group/tmousavi/gyunghuy/cache/huggingface/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
-)
-DEFAULT_SCIENCE_STORAGE_DIR = os.environ.get(
-    "SCIENCE_STORAGE_DIR",
-    "outputs/paper_memory_storage_science",
-)
-DEFAULT_CHUNKS_LABELED_PATH = Path(
-    os.environ.get("CHUNKS_LABELED_PATH", "outputs/chunks_labeled.jsonl")
-)
-DEFAULT_RAG2_OUTPUT_PATH = Path(
-    os.environ.get("RAG2_OUTPUT_PATH", "outputs/rag2_advice.json")
+DEFAULT_REVIEWER_PROMPT = (
+    "You are a strict reviewer focused on narrowing scope into an executable experiment. "
+    "Prioritize BOM realism, experimental realism, and reductions in scope over ambition."
 )
 
+DEFAULT_SCIENCE_STORAGE_DIR = Path("outputs/paper_memory_storage_science")
+DEFAULT_CHUNKS_LABELED_PATH = Path("outputs/chunks_labeled.jsonl")
+DEFAULT_RAG2_OUTPUT_PATH = Path("outputs/rag2_advice.json")
 
 configure_embedding_model()
-llm = get_local_llm()
-
 
 
 def overlap_score_text(text: str, bom: dict) -> int:
@@ -60,9 +48,6 @@ def overlap_score_text(text: str, bom: dict) -> int:
 
 
 def load_labeled_rows(path: Path) -> list[dict]:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing chunks_labeled file: {path}")
-
     rows = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -161,15 +146,11 @@ def build_rag2_prompt(
     supporting_chunk_context: str,
     prompt_variant_text: str | None = None,
 ) -> str:
-    variant_block = ""
-    if prompt_variant_text:
-        variant_block = f"""
-
-Additional reviewer instructions for this run:
-{prompt_variant_text.strip()}
-"""
+    reviewer_prefix = (prompt_variant_text or DEFAULT_REVIEWER_PROMPT).strip()
 
     return f"""
+{reviewer_prefix}
+
 You are RAG2, a literature-grounded experiment feasibility advisor.
 
 Your role:
@@ -223,7 +204,7 @@ Status meaning:
 - mostly_feasible = good core idea, but still needs 1-2 practical revisions
 - partially_feasible = plausible, but still too broad or under-specified
 - limited = significant execution limits remain
-- not_feasible = not realistically executable with current BOM{variant_block}
+- not_feasible = not realistically executable with current BOM
 
 Available BOM:
 {json.dumps(available_bom, indent=2)}
@@ -298,19 +279,25 @@ def run_rag2(
     cached_sci_evidence: dict | None = None,
     save_output: bool = True,
     prompt_variant_text: str | None = None,
-    science_index_dir: str | Path | None = None,
-    chunks_labeled_path: str | Path | None = None,
+    science_index_dir: str | Path = DEFAULT_SCIENCE_STORAGE_DIR,
+    chunks_labeled_path: str | Path = DEFAULT_CHUNKS_LABELED_PATH,
     output_path: str | Path | None = None,
+    temperature: float = 0.0,
+    top_p: float = 0.95,
+    seed: int | None = None,
+    model_name: str | None = None,
 ) -> dict:
+    llm = get_shared_llm(model_name)
+    science_index_dir = Path(science_index_dir)
+    chunks_labeled_path = Path(chunks_labeled_path)
+    output_path = Path(output_path) if output_path is not None else DEFAULT_RAG2_OUTPUT_PATH
+
     available_bom = rag1_output["available_bom"]
     rag1_proposal = rag1_output["rag1_proposal"]
-    science_index_dir = str(science_index_dir or DEFAULT_SCIENCE_STORAGE_DIR)
-    chunks_labeled_path = Path(chunks_labeled_path or DEFAULT_CHUNKS_LABELED_PATH)
-    output_path = Path(output_path or DEFAULT_RAG2_OUTPUT_PATH)
 
     if cached_sci_evidence is None:
         storage_context = StorageContext.from_defaults(
-            persist_dir=science_index_dir
+            persist_dir=str(science_index_dir)
         )
         science_index = load_index_from_storage(storage_context)
 
@@ -326,10 +313,10 @@ def run_rag2(
 
         shortlist = ranked_science[:7]
 
-        print("\\nRAG2 round-1 retrieval: caching science evidence pool.")
-        print("\\nRetrieved science references for RAG2:")
+        print("\nRAG2 round-1 retrieval: caching science evidence pool.")
+        print("\nRetrieved science references for RAG2:")
         for i, node in enumerate(shortlist, 1):
-            print(f"\\n[{i}] {node.metadata.get('source_title')}")
+            print(f"\n[{i}] {node.metadata.get('source_title')}")
             print(f"Card Type: {node.metadata.get('card_type', '')}")
 
         labeled_rows = load_labeled_rows(chunks_labeled_path)
@@ -344,8 +331,8 @@ def run_rag2(
         for node in shortlist:
             source_path = node.metadata.get("source_path", "")
             title = node.metadata.get("source_title", "")
-            n_chunks = len(paper_to_chunks.get(source_path, []))
-            print(f"{title}: {n_chunks} chunks")
+            n = len(paper_to_chunks.get(source_path, []))
+            print(f"{title}: {n} chunks")
 
         cached_sci_evidence = {
             "cards": [
@@ -360,9 +347,8 @@ def run_rag2(
             ],
             "paper_to_chunks": paper_to_chunks,
         }
-
     else:
-        print("\\nRAG2 is reusing cached science evidence pool.")
+        print("\nRAG2 is reusing cached science evidence pool.")
         shortlist = cached_sci_evidence["cards"]
         paper_to_chunks = cached_sci_evidence["paper_to_chunks"]
 
@@ -398,7 +384,7 @@ DOI: {doi}
 """
         )
 
-    science_card_context = "\\n\\n" + ("\\n\\n" + "=" * 80 + "\\n\\n").join(science_blocks)
+    science_card_context = "\n\n" + ("\n\n" + "=" * 80 + "\n\n").join(science_blocks)
 
     chunk_blocks = []
     chunk_idx = 1
@@ -430,7 +416,7 @@ Text:
             )
             chunk_idx += 1
 
-    supporting_chunk_context = "\\n\\n" + ("\\n\\n" + "=" * 80 + "\\n\\n").join(chunk_blocks)
+    supporting_chunk_context = "\n\n" + ("\n\n" + "=" * 80 + "\n\n").join(chunk_blocks)
 
     rag2_prompt = build_rag2_prompt(
         available_bom=available_bom,
@@ -440,7 +426,13 @@ Text:
         prompt_variant_text=prompt_variant_text,
     )
 
-    raw_output = llm.complete(rag2_prompt, max_new_tokens=1600)
+    raw_output = llm.complete(
+        rag2_prompt,
+        max_new_tokens=1600,
+        temperature=temperature,
+        top_p=top_p,
+        seed=seed,
+    )
 
     try:
         json_text = extract_json_block(raw_output)
@@ -484,7 +476,7 @@ Text:
             "parse_failed": True,
         }
 
-    print("\\n" + "=" * 100)
+    print("\n" + "=" * 100)
     print("RAG2 ADVICE")
     print("=" * 100)
     print(json.dumps(rag2_advice, indent=2, ensure_ascii=False))
@@ -493,15 +485,21 @@ Text:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf-8") as f:
             json.dump(rag2_advice, f, indent=2, ensure_ascii=False)
-        print(f"\\nSaved RAG2 output to: {output_path}")
+        print(f"\nSaved RAG2 output to: {output_path}")
 
-    print("\\nReference Map:")
+    print("\nReference Map:")
     for ref_id, meta in reference_map.items():
         print(f"{ref_id}: {meta['title']} | DOI: {meta['doi']}")
 
     return {
         "rag2_advice": rag2_advice,
         "cached_sci_evidence": cached_sci_evidence,
+        "generation_config": {
+            "temperature": temperature,
+            "top_p": top_p,
+            "seed": seed,
+            "model_name": llm.model_name,
+        },
     }
 
 

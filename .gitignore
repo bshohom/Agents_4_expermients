@@ -14,7 +14,8 @@ outputs/
 outputs_parallel/
 outputs_prompt_sweep/
 outputs_prompt_sweep_compiled/
-
+*.txt
+*.json
 # Logs and Archives
 logs/
 *.log
