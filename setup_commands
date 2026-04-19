@@ -1,0 +1,7 @@
+cd $GROUP
+cd sboseban
+cd code
+cd Agents_4_Expermients
+module load anaconda3/2023.03-1
+eval "$(conda shell.bash hook)"
+conda activate /trace/group/forgelab/sboseban/envs/agents4experiments

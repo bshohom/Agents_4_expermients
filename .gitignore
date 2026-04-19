@@ -1,0 +1,27 @@
+# Python compilation
+**/__pycache__/
+*.pyc
+
+# Research Data & Indices (Entire Folders)
+data/
+indices/
+external_corpora/
+lit/
+lit_shards/
+
+# LLM Outputs & Results
+outputs/
+outputs_parallel/
+outputs_prompt_sweep/
+outputs_prompt_sweep_compiled/
+
+# Logs and Archives
+logs/
+*.log
+*.err
+*.out
+*.zip
+
+# Data formats
+*.jsonl
+*.ijson

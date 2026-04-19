@@ -1,0 +1,34 @@
+You are given:
+1. a bill of materials / available equipment specification
+2. retrieved paper cards from literature
+3. a user goal
+
+BOM:
+{bom_json}
+
+User Goal:
+{user_goal}
+
+Retrieved Evidence:
+{retrieved_context}
+
+Task:
+Propose exactly one experiment that is both:
+- grounded in one or more retrieved cards
+- feasible with the given BOM
+
+Required output format:
+- Proposed Experiment:
+- Why It Fits the BOM:
+- Needed Equipment:
+- Controllable Parameters:
+- Measurements / Outputs:
+- Supporting Paper Card Titles:
+- Risks / Unknowns:
+
+Rules:
+- Use only retrieved evidence.
+- Do not invent unavailable equipment.
+- Prefer experiments that match the listed available equipment and consumables.
+- If the BOM does not support a retrieved option, say so and choose a better-supported one if possible.
+- If the retrieved evidence is insufficient, say exactly what is missing.
